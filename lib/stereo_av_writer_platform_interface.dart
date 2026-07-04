@@ -1,5 +1,6 @@
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
+import 'src/slice_one.dart';
 import 'stereo_av_writer_method_channel.dart';
 
 abstract class StereoAvWriterPlatform extends PlatformInterface {
@@ -25,5 +26,10 @@ abstract class StereoAvWriterPlatform extends PlatformInterface {
 
   Future<String?> getPlatformVersion() {
     throw UnimplementedError('platformVersion() has not been implemented.');
+  }
+
+  /// Run a synthetic slice-1 mux + sync measurement. See `docs/slice-1-spec.md`.
+  Future<SliceOneResult> runSliceOne(SliceOneConfig config) {
+    throw UnimplementedError('runSliceOne() has not been implemented.');
   }
 }

@@ -28,5 +28,9 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Records video to prove audio/video sync (camera slice).</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Records stereo audio to prove audio/video sync (camera slice).</string>
 </dict>
 </plist>

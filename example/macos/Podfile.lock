@@ -1,0 +1,28 @@
+PODS:
+  - FlutterMacOS (1.0.0)
+  - multichannel_capture (0.0.1):
+    - FlutterMacOS
+  - stereo_av_writer (0.0.1):
+    - FlutterMacOS
+
+DEPENDENCIES:
+  - FlutterMacOS (from `Flutter/ephemeral`)
+  - multichannel_capture (from `Flutter/ephemeral/.symlinks/plugins/multichannel_capture/macos`)
+  - stereo_av_writer (from `Flutter/ephemeral/.symlinks/plugins/stereo_av_writer/macos`)
+
+EXTERNAL SOURCES:
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+  multichannel_capture:
+    :path: Flutter/ephemeral/.symlinks/plugins/multichannel_capture/macos
+  stereo_av_writer:
+    :path: Flutter/ephemeral/.symlinks/plugins/stereo_av_writer/macos
+
+SPEC CHECKSUMS:
+  FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
+  multichannel_capture: 951a14eb80a8c182de68e4089819adcf479fa5c8
+  stereo_av_writer: b38fef9d9d28a498f513db224e4b8c1c2fb638cf
+
+PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009
+
+COCOAPODS: 1.16.2

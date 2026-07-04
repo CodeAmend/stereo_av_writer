@@ -4,14 +4,14 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'stereo_av_writer'
-  s.version          = '0.0.1'
+  s.version          = '0.1.0'
   s.summary          = 'Mux stereo audio + video frames into one synced file on a single AVAssetWriter timeline (macOS).'
   s.description      = <<-DESC
 Mux stereo audio + video frames into one synced file on a single AVAssetWriter timeline (macOS).
                        DESC
-  s.homepage         = 'http://example.com'
+  s.homepage         = 'https://github.com/CodeAmend/stereo_av_writer'
   s.license          = { :file => '../LICENSE' }
-  s.author           = { 'Your Company' => 'email@example.com' }
+  s.author           = { 'Michael Bruce Allen' => 'acousticbruce@gmail.com' }
 
   s.source           = { :path => '.' }
   s.source_files = 'Classes/**/*'

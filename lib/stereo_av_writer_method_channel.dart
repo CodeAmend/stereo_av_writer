@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'src/slice_one.dart';
 import 'stereo_av_writer_platform_interface.dart';
 
 /// An implementation of [StereoAvWriterPlatform] that uses method channels.
@@ -15,5 +16,17 @@ class MethodChannelStereoAvWriter extends StereoAvWriterPlatform {
       'getPlatformVersion',
     );
     return version;
+  }
+
+  @override
+  Future<SliceOneResult> runSliceOne(SliceOneConfig config) async {
+    final map = await methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+      'runSliceOne',
+      config.toMap(),
+    );
+    if (map == null) {
+      throw StateError('runSliceOne returned no result');
+    }
+    return SliceOneResult.fromMap(map);
   }
 }
