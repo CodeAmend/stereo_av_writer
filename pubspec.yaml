@@ -1,6 +1,6 @@
 name: stereo_av_writer
 description: "Mux stereo audio + video frames into one synced file on a single AVAssetWriter timeline (macOS)."
-version: 0.1.0
+version: 0.2.0
 homepage: https://github.com/CodeAmend/stereo_av_writer
 
 environment:
@@ -13,7 +13,9 @@ dependencies:
   plugin_platform_interface: ^2.0.2
   # The stitcher owns everything audio-and-after: it drives the stereo capture itself.
   multichannel_capture:
-    path: ../multichannel_capture
+    git:
+      url: git@github.com:CodeAmend/multichannel_capture.git
+      ref: d83b3a6
 
 dev_dependencies:
   flutter_test:

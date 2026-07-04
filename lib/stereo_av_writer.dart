@@ -3,6 +3,7 @@ import 'stereo_av_writer_platform_interface.dart';
 
 export 'src/slice_one.dart';
 export 'src/camera_recorder.dart';
+export 'src/camera_preview.dart';
 
 class StereoAvWriter {
   Future<String?> getPlatformVersion() {

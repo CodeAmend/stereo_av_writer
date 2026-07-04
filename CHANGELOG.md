@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0
+
+Product surface for in-app recording (stretto v0.79 integration).
+
+- **AAC audio** for camera recording (was LPCM, the sync-measurement codec).
+- **Embedded live preview**: `StereoAvPreview` (`AppKitView`) over a native
+  `AVCaptureVideoPreviewLayer`, backed by a recorder **lifecycle split** —
+  `startPreview()` runs the session for preview → `beginRecording()` attaches the
+  writer → `stop()`.
+- **Device enumeration + selection**: `listCameras()` / `CameraDevice`, plus
+  `cameraId` + `audioDeviceIndex` on `startPreview` (built-in + external cameras,
+  e.g. an OBS virtual cam; audio via `multichannel_capture` device index).
+- **Live L/R levels + mono**: a broadcast `levels` stream (`StereoLevels`, per-channel
+  peak) and a `mono` flag that averages channels to both — for an in-app meter and a
+  mono-signal option.
+- Dependency on `multichannel_capture` switched from a local `path:` to a `git:` ref.
+
 ## 0.1.0 (unreleased)
 
 Initial development. The A/V sync core is built and empirically verified; product surface

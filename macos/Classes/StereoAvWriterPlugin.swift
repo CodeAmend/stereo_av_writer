@@ -1,3 +1,4 @@
+import AVFoundation
 import Cocoa
 import FlutterMacOS
 
@@ -9,6 +10,8 @@ public class StereoAvWriterPlugin: NSObject, FlutterPlugin {
     let channel = FlutterMethodChannel(name: "stereo_av_writer", binaryMessenger: registrar.messenger)
     let instance = StereoAvWriterPlugin()
     registrar.addMethodCallDelegate(instance, channel: channel)
+    // v0.79.3 — embedded live preview platform view.
+    registrar.register(CameraPreviewViewFactory(), withId: "stereo_av_writer/preview")
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -99,6 +102,49 @@ public class StereoAvWriterPlugin: NSObject, FlutterPlugin {
           }
         }
       }
+
+    case "startCameraPreview":
+      let args = (call.arguments as? [String: Any]) ?? [:]
+      var cfg = CameraRecorder.Config(outputPath: (args["outputPath"] as? String)
+                                        ?? NSTemporaryDirectory() + "rec.mov")
+      if let v = args["fps"] as? Int { cfg.fps = v }
+      if let v = args["channels"] as? Int { cfg.channels = v }
+      if let v = args["sampleRate"] as? Int { cfg.sampleRate = v }
+      let rec = CameraRecorder(config: cfg)
+      recorder = rec
+      rec.startPreview(cameraId: args["cameraId"] as? String) { error in
+        DispatchQueue.main.async {
+          if let e = error {
+            result(FlutterError(code: "preview_failed", message: e.localizedDescription, details: "\(e)"))
+          } else {
+            result(nil)
+          }
+        }
+      }
+
+    case "beginCameraRecording":
+      guard let rec = recorder else {
+        result(FlutterError(code: "no_preview", message: "startCameraPreview first", details: nil))
+        return
+      }
+      rec.beginRecording { error in
+        DispatchQueue.main.async {
+          if let e = error {
+            result(FlutterError(code: "begin_failed", message: e.localizedDescription, details: "\(e)"))
+          } else {
+            result(nil)
+          }
+        }
+      }
+
+    case "listCameras":
+      // Include external cameras so an OBS virtual cam is pickable. `.externalUnknown`
+      // is the pre-macOS-14 type (deprecated → `.external` on 14+, still resolves here).
+      let discovery = AVCaptureDevice.DiscoverySession(
+        deviceTypes: [.builtInWideAngleCamera, .externalUnknown],
+        mediaType: .video, position: .unspecified)
+      let cams = discovery.devices.map { ["id": $0.uniqueID, "name": $0.localizedName] }
+      result(cams)
 
     default:
       result(FlutterMethodNotImplemented)

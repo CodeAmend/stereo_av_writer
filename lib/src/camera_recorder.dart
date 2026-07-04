@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 import 'package:multichannel_capture/multichannel_capture.dart' as mc;
@@ -35,6 +36,21 @@ class ClapAnalysis {
       '${driftMillis != null ? ', drift=${driftMillis!.toStringAsFixed(1)}ms' : ''})';
 }
 
+/// A selectable capture device (camera). From [StereoAvCameraRecorder.listCameras].
+class CameraDevice {
+  final String id;
+  final String name;
+  const CameraDevice(this.id, this.name);
+}
+
+/// Live per-channel audio level (peak, 0..1) from [StereoAvCameraRecorder.levels].
+/// In mono mode [left] == [right] (both fed the downmix).
+class StereoLevels {
+  final double left;
+  final double right;
+  const StereoLevels(this.left, this.right);
+}
+
 /// Camera-slice recorder: the stitcher's Dart layer owns the `multichannel_capture`
 /// session, starts the native video-only capture + writer, and pipes `timedFrames`
 /// down to the native writer (decision #3a). See `docs/camera-slice-spec.md`.
@@ -47,7 +63,24 @@ class StereoAvCameraRecorder {
   int _channels = 2;
   int _sampleRate = 48000;
 
+  /// v0.79.4 — downmix to mono: average all channels → write the same value to
+  /// each. Affects BOTH the written audio and [levels] (both channels go
+  /// identical). Toggle any time (preview or recording) — the writer's format is
+  /// unchanged, only the sample values. Default false (true stereo).
+  bool mono = false;
+  final StreamController<StereoLevels> _levelsCtrl =
+      StreamController<StereoLevels>.broadcast();
+
   bool get isRecording => _capture != null;
+
+  /// v0.79.4 — live L/R audio level (peak, 0..1) computed off the capture batches.
+  /// Emits during preview AND recording (audio is open in both). Broadcast.
+  Stream<StereoLevels> get levels => _levelsCtrl.stream;
+
+  /// Release the levels stream. Call when the recorder is discarded.
+  void dispose() {
+    _levelsCtrl.close();
+  }
 
   /// Start a recording. Prompts for microphone (via `multichannel_capture`) then camera
   /// (native) the first time. `preview` shows a throwaway native aim window.
@@ -84,12 +117,63 @@ class StereoAvCameraRecorder {
 
     // 3. Pipe timedFrames → native writer (#3a). hostTime travels with the samples, so
     //    the Dart hop adds latency, not timestamp error.
-    _sub = cap.timedFrames.listen((batch) {
-      _ch.invokeMethod('pushAudioBatch', {
-        'samples': batch.samples,
-        'hostTime': batch.hostTime,
+    _sub = cap.timedFrames.listen(_handleBatch);
+  }
+
+  /// v0.79.3 — enumerate cameras (built-in + external, e.g. an OBS virtual cam).
+  Future<List<CameraDevice>> listCameras() async {
+    final list = await _ch.invokeMethod<List<dynamic>>('listCameras');
+    return (list ?? [])
+        .map((e) => CameraDevice(
+              (e as Map)['id'] as String,
+              e['name'] as String,
+            ))
+        .toList();
+  }
+
+  /// v0.79.3 — start LIVE PREVIEW: bring up audio (to learn the real negotiated
+  /// format) + the video-only capture session, but NOT the writer. Mount a
+  /// [StereoAvPreview] after this to see the camera. Audio is piped down already
+  /// but the native side drops it until [beginRecording]. Pass [cameraId] from
+  /// [listCameras] (or null for the system default).
+  Future<void> startPreview({
+    required String outputPath,
+    String? cameraId,
+    int? audioDeviceIndex,
+    int fps = 30,
+  }) async {
+    if (isRecording) throw StateError('already active');
+    _outputPath = outputPath;
+
+    final cap = mc.startCapture(
+      deviceIndex: audioDeviceIndex,
+      sampleRate: 48000,
+      channels: 2,
+    );
+    _capture = cap;
+    _channels = cap.channels;
+    _sampleRate = cap.sampleRate;
+
+    try {
+      await _ch.invokeMethod('startCameraPreview', {
+        'outputPath': outputPath,
+        'fps': fps,
+        'channels': _channels,
+        'sampleRate': _sampleRate,
+        'cameraId': ?cameraId,
       });
-    });
+    } catch (_) {
+      cap.stop();
+      _capture = null;
+      rethrow;
+    }
+
+    _sub = cap.timedFrames.listen(_handleBatch);
+  }
+
+  /// v0.79.3 — attach the writer and start recording (call after [startPreview]).
+  Future<void> beginRecording() async {
+    await _ch.invokeMethod('beginCameraRecording');
   }
 
   /// Stop, finalize the file, and return its path.
@@ -100,6 +184,57 @@ class StereoAvCameraRecorder {
     _capture = null;
     final path = await _ch.invokeMethod<String>('stopCameraRecording');
     return path ?? _outputPath;
+  }
+
+  // One place both capture paths funnel through: apply the mono downmix if set,
+  // push the (possibly processed) samples to the native writer, and emit the L/R
+  // level for the meter — all from the SAME samples, so mono → identical bars.
+  void _handleBatch(mc.TimedAudioBatch batch) {
+    var samples = batch.samples;
+    if (mono && _channels >= 2) {
+      samples = _monoize(samples, _channels);
+    }
+    _ch.invokeMethod('pushAudioBatch', {
+      'samples': samples,
+      'hostTime': batch.hostTime,
+    });
+    if (_channels >= 1 && _levelsCtrl.hasListener) {
+      _levelsCtrl.add(_computeLevels(samples, _channels));
+    }
+  }
+
+  /// Average all channels per frame and write the mean back to every channel.
+  static Float32List _monoize(Float32List interleaved, int channels) {
+    final frames = interleaved.length ~/ channels;
+    final out = Float32List(interleaved.length);
+    for (var f = 0; f < frames; f++) {
+      final base = f * channels;
+      var sum = 0.0;
+      for (var c = 0; c < channels; c++) {
+        sum += interleaved[base + c];
+      }
+      final avg = sum / channels;
+      for (var c = 0; c < channels; c++) {
+        out[base + c] = avg;
+      }
+    }
+    return out;
+  }
+
+  /// Peak magnitude per channel (L = ch0, R = ch1, or ch0 again if mono device).
+  static StereoLevels _computeLevels(Float32List interleaved, int channels) {
+    final frames = interleaved.length ~/ channels;
+    if (frames == 0) return const StereoLevels(0, 0);
+    final rightCh = channels >= 2 ? 1 : 0;
+    var lPeak = 0.0, rPeak = 0.0;
+    for (var f = 0; f < frames; f++) {
+      final base = f * channels;
+      final l = interleaved[base].abs();
+      final r = interleaved[base + rightCh].abs();
+      if (l > lPeak) lPeak = l;
+      if (r > rPeak) rPeak = r;
+    }
+    return StereoLevels(lPeak > 1 ? 1 : lPeak, rPeak > 1 ? 1 : rPeak);
   }
 
   /// Run the clap detectors over a recorded file.

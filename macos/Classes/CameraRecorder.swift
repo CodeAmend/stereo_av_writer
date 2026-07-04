@@ -39,6 +39,10 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private var core: AVWriterCore!
     private var previewWindow: NSWindow?
 
+    // v0.79.3 — true once the writer is attached (beginRecording). While false the
+    // session runs for live preview only and delegate/audio frames are dropped.
+    private var recording = false
+
     // Origin state — touched only on writerQueue.
     private var originSet = false
     private var firstVideoPTS: CMTime?
@@ -49,19 +53,66 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     // MARK: - Lifecycle
 
+    /// Legacy one-shot (original `startCameraRecording` path): configure the
+    /// session, attach the writer, and run — recording immediately. `preview` here
+    /// is the throwaway debug window.
     func start(completion: @escaping (Error?) -> Void) {
         AVCaptureDevice.requestAccess(for: .video) { granted in
             guard granted else { completion(RecorderError.cameraPermissionDenied); return }
-            do { try self.configureAndStart(); completion(nil) }
-            catch { completion(error) }
+            do {
+                try self.configureSession(cameraId: nil)
+                try self.makeWriter()
+                self.recording = true
+                if self.config.preview { self.showPreview() }
+                self.session.startRunning()
+                completion(nil)
+            } catch { completion(error) }
         }
     }
 
-    private func configureAndStart() throws {
+    /// v0.79.3 — run the capture session for LIVE PREVIEW only (no writer). The
+    /// embedded preview view binds to this session via `PreviewSessionRegistry`.
+    /// `cameraId` is an `AVCaptureDevice.uniqueID`, or nil for the system default.
+    func startPreview(cameraId: String?, completion: @escaping (Error?) -> Void) {
+        AVCaptureDevice.requestAccess(for: .video) { granted in
+            guard granted else { completion(RecorderError.cameraPermissionDenied); return }
+            do {
+                try self.configureSession(cameraId: cameraId)
+                PreviewSessionRegistry.shared.session = self.session
+                self.session.startRunning()
+                completion(nil)
+            } catch { completion(error) }
+        }
+    }
+
+    /// v0.79.3 — attach the writer and start recording (session already running
+    /// from `startPreview`). Frames flow to the writer only after this.
+    func beginRecording(completion: @escaping (Error?) -> Void) {
+        writerQueue.async {
+            do {
+                try self.makeWriter()
+                self.originSet = false
+                self.firstVideoPTS = nil
+                self.firstAudioPTS = nil
+                self.pending.removeAll()
+                self.recording = true
+                completion(nil)
+            } catch { completion(error) }
+        }
+    }
+
+    private func configureSession(cameraId: String?) throws {
         session.beginConfiguration()
         if session.canSetSessionPreset(.vga640x480) { session.sessionPreset = .vga640x480 }
 
-        guard let device = AVCaptureDevice.default(for: .video) else { throw RecorderError.noCameraDevice }
+        let device: AVCaptureDevice
+        if let id = cameraId, let d = AVCaptureDevice(uniqueID: id) {
+            device = d
+        } else if let d = AVCaptureDevice.default(for: .video) {
+            device = d
+        } else {
+            throw RecorderError.noCameraDevice
+        }
         let input = try AVCaptureDeviceInput(device: device)
         guard session.canAddInput(input) else { throw RecorderError.cannotAddCameraInput }
         session.addInput(input)
@@ -72,10 +123,12 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         guard session.canAddOutput(videoOutput) else { throw RecorderError.cannotAddVideoOutput }
         session.addOutput(videoOutput)
         session.commitConfiguration()
+    }
 
-        // Inject the clock the camera stamps PTS against — the whole architecture's
-        // meeting point. `synchronizationClock` is macOS 12.3+ and defaults to the host
-        // clock; below that (and as fallback) use the host clock directly — same domain.
+    private func makeWriter() throws {
+        // Inject the clock the camera stamps PTS against — the architecture's meeting
+        // point. `synchronizationClock` is macOS 12.3+ and defaults to the host clock;
+        // below that (and as fallback) use the host clock directly — same domain.
         let clock: CMClock
         if #available(macOS 12.3, *) {
             clock = session.synchronizationClock ?? CMClockGetHostTimeClock()
@@ -85,17 +138,19 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         core = try AVWriterCore(outputURL: URL(fileURLWithPath: config.outputPath),
                                 width: Self.width, height: Self.height, fps: config.fps,
                                 sampleRate: config.sampleRate, channels: config.channels,
-                                audioCodec: .lpcm, realTime: true, clock: clock)
+                                audioCodec: .aac, realTime: true, clock: clock)
         try core.beginWriting()
-
-        if config.preview { showPreview() }
-        session.startRunning()
     }
 
     func stop(completion: @escaping (String?, Error?) -> Void) {
         session.stopRunning()
         hidePreview()
+        if PreviewSessionRegistry.shared.session === session {
+            PreviewSessionRegistry.shared.session = nil
+        }
         writerQueue.async {
+            guard self.recording, self.core != nil else { completion(nil, nil); return }
+            self.recording = false
             self.core.finish { err in completion(self.config.outputPath, err) }
         }
     }
@@ -105,7 +160,12 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        writerQueue.async { self.handle(sampleBuffer, isVideo: true) }
+        // Preview-only frames (before beginRecording) are dropped — the preview layer
+        // renders straight from the session, not through the writer.
+        writerQueue.async {
+            guard self.recording else { return }
+            self.handle(sampleBuffer, isVideo: true)
+        }
     }
 
     // MARK: - Audio in (Dart-pushed #3a → writer queue)
@@ -114,6 +174,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     /// raw mach units (the capture instant), so the PTS is correct regardless of how late
     /// the Dart hop delivered it (spec §5).
     func appendAudioBatch(samples: [Float], hostTime: UInt64) {
+        guard recording else { return }
         let pts = CMClockMakeHostTimeFromSystemUnits(hostTime)
         guard let sb = SyntheticProducers.audioSampleBuffer(
                 from: samples, channels: config.channels,
