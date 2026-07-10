@@ -40,7 +40,11 @@ class ClapAnalysis {
 class CameraDevice {
   final String id;
   final String name;
-  const CameraDevice(this.id, this.name);
+
+  /// v0.82 .3b — true for an external camera (vs the built-in FaceTime cam). Lets
+  /// the record modal default the mirror per camera (built-in → on, external → off).
+  final bool isExternal;
+  const CameraDevice(this.id, this.name, {this.isExternal = false});
 }
 
 /// Live per-channel audio level (peak, 0..1) from [StereoAvCameraRecorder.levels].
@@ -62,6 +66,8 @@ class StereoAvCameraRecorder {
   String? _outputPath;
   int _channels = 2;
   int _sampleRate = 48000;
+  double? _captureWidth;
+  double? _captureHeight;
 
   /// v0.79.4 — downmix to mono: average all channels → write the same value to
   /// each. Affects BOTH the written audio and [levels] (both channels go
@@ -72,6 +78,15 @@ class StereoAvCameraRecorder {
       StreamController<StereoLevels>.broadcast();
 
   bool get isRecording => _capture != null;
+
+  /// v0.82 .3b — the negotiated capture aspect ratio (width / height), from the
+  /// native session's REAL dimensions; null before [startPreview] reports them.
+  /// The record modal derives its layout from this (arch-82 D8: honest AR).
+  double? get previewAspectRatio {
+    final w = _captureWidth, h = _captureHeight;
+    if (w == null || h == null || h == 0) return null;
+    return w / h;
+  }
 
   /// v0.79.4 — live L/R audio level (peak, 0..1) computed off the capture batches.
   /// Emits during preview AND recording (audio is open in both). Broadcast.
@@ -127,6 +142,7 @@ class StereoAvCameraRecorder {
         .map((e) => CameraDevice(
               (e as Map)['id'] as String,
               e['name'] as String,
+              isExternal: (e['isExternal'] as bool?) ?? false,
             ))
         .toList();
   }
@@ -155,13 +171,23 @@ class StereoAvCameraRecorder {
     _sampleRate = cap.sampleRate;
 
     try {
-      await _ch.invokeMethod('startCameraPreview', {
-        'outputPath': outputPath,
-        'fps': fps,
-        'channels': _channels,
-        'sampleRate': _sampleRate,
-        'cameraId': ?cameraId,
-      });
+      // v0.82 .3b — the native side returns the negotiated capture dimensions.
+      final dims = await _ch.invokeMethod<Map<dynamic, dynamic>>(
+        'startCameraPreview',
+        {
+          'outputPath': outputPath,
+          'fps': fps,
+          'channels': _channels,
+          'sampleRate': _sampleRate,
+          'cameraId': ?cameraId,
+        },
+      );
+      final w = (dims?['width'] as num?)?.toDouble();
+      final h = (dims?['height'] as num?)?.toDouble();
+      if (w != null && h != null && w > 0 && h > 0) {
+        _captureWidth = w;
+        _captureHeight = h;
+      }
     } catch (_) {
       cap.stop();
       _capture = null;
@@ -172,8 +198,38 @@ class StereoAvCameraRecorder {
   }
 
   /// v0.79.3 — attach the writer and start recording (call after [startPreview]).
+  /// v0.82 .3b — send the CURRENT negotiated audio format so a mic swapped during
+  /// preview (via [reconfigureAudio]) is reflected in the writer.
   Future<void> beginRecording() async {
-    await _ch.invokeMethod('beginCameraRecording');
+    await _ch.invokeMethod('beginCameraRecording', {
+      'channels': _channels,
+      'sampleRate': _sampleRate,
+    });
+  }
+
+  /// v0.82 .3b — swap ONLY the audio capture (mic change) without touching the
+  /// native camera session, so the live preview does NOT reload (decouple the
+  /// capture legs). Preview-phase only; the new format is taken at [beginRecording].
+  Future<void> reconfigureAudio({int? audioDeviceIndex}) async {
+    await _sub?.cancel();
+    _sub = null;
+    _capture?.stop();
+    final cap = mc.startCapture(
+      deviceIndex: audioDeviceIndex,
+      sampleRate: 48000,
+      channels: 2,
+    );
+    _capture = cap;
+    _channels = cap.channels;
+    _sampleRate = cap.sampleRate;
+    _sub = cap.timedFrames.listen(_handleBatch);
+  }
+
+  /// v0.82 .3b — mirror BOTH the preview and the RECORDED frames in lockstep =
+  /// true WYSIWYG (arch-82 D2). Default on (an instrument reads naturally); flip
+  /// off for a behind/overhead camera whose framing is already correct.
+  Future<void> setMirror(bool mirrored) async {
+    await _ch.invokeMethod('setMirror', {'mirrored': mirrored});
   }
 
   /// Stop, finalize the file, and return its path.

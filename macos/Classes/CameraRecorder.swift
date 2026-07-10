@@ -23,12 +23,17 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         case cannotAddVideoOutput
     }
 
-    // Fixed small, widely-supported capture size; resolution is irrelevant to the sync
-    // proof and 640×480 keeps motion detection cheap.
-    private static let width = 640
-    private static let height = 480
+    // v0.82 .3b — capture at HD (1080p preferred; 720p then VGA fallback for old
+    // FaceTime cams). The ACTUAL negotiated dimensions are read from the device format
+    // in configureSession and used for the writer + reported to Dart, so the recorded
+    // file and the reported aspect ratio always match the real frames (arch-82 D8).
+    private var captureWidth = 1920
+    private var captureHeight = 1080
 
-    private let config: Config
+    /// The negotiated capture dimensions (set in `configureSession`; reported to Dart).
+    var dimensions: (width: Int, height: Int) { (captureWidth, captureHeight) }
+
+    private var config: Config
     private let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let delegateQueue = DispatchQueue(label: "stereo_av_writer.capture.video")
@@ -87,8 +92,12 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     /// v0.79.3 — attach the writer and start recording (session already running
     /// from `startPreview`). Frames flow to the writer only after this.
-    func beginRecording(completion: @escaping (Error?) -> Void) {
+    func beginRecording(channels: Int, sampleRate: Int, completion: @escaping (Error?) -> Void) {
         writerQueue.async {
+            // v0.82 .3b — the mic may have been swapped during preview (audio-only
+            // reconfigure), so take the CURRENT negotiated format for the writer.
+            self.config.channels = channels
+            self.config.sampleRate = sampleRate
             do {
                 try self.makeWriter()
                 self.originSet = false
@@ -103,7 +112,14 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     private func configureSession(cameraId: String?) throws {
         session.beginConfiguration()
-        if session.canSetSessionPreset(.vga640x480) { session.sessionPreset = .vga640x480 }
+        // v0.82 .3b — prefer 1080p HD; fall back to 720p, then VGA (old FaceTime cams).
+        if session.canSetSessionPreset(.hd1920x1080) {
+            session.sessionPreset = .hd1920x1080
+        } else if session.canSetSessionPreset(.hd1280x720) {
+            session.sessionPreset = .hd1280x720
+        } else {
+            session.sessionPreset = .vga640x480
+        }
 
         let device: AVCaptureDevice
         if let id = cameraId, let d = AVCaptureDevice(uniqueID: id) {
@@ -117,11 +133,38 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         guard session.canAddInput(input) else { throw RecorderError.cannotAddCameraInput }
         session.addInput(input)
 
+        // Read the ACTUAL dimensions the preset negotiated on this device, so the writer
+        // encodes — and Dart reports the AR — at the real size, never a hard-coded guess.
+        let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        if dims.width > 0 && dims.height > 0 {
+            captureWidth = Int(dims.width)
+            captureHeight = Int(dims.height)
+        }
+
         videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: delegateQueue)
         guard session.canAddOutput(videoOutput) else { throw RecorderError.cannotAddVideoOutput }
         session.addOutput(videoOutput)
+        // v0.82 .3b — mirror the RECORDED frames in lockstep with the preview
+        // (default on): an instrument reads naturally for the student — piano bass
+        // stays on the left, not flipped to a backwards keyboard. Off for text /
+        // overhead framing. arch-82 D2.
+        if let conn = videoOutput.connection(with: .video), conn.isVideoMirroringSupported {
+            conn.automaticallyAdjustsVideoMirroring = false
+            conn.isVideoMirrored = PreviewSessionRegistry.shared.mirrored
+        }
+        session.commitConfiguration()
+    }
+
+    /// v0.82 .3b — flip the RECORDED frames live (the preview mirrors in lockstep
+    /// via the registry). Both together = true WYSIWYG.
+    func applyMirrorToOutput(_ mirrored: Bool) {
+        guard let conn = videoOutput.connection(with: .video),
+              conn.isVideoMirroringSupported else { return }
+        session.beginConfiguration()
+        conn.automaticallyAdjustsVideoMirroring = false
+        conn.isVideoMirrored = mirrored
         session.commitConfiguration()
     }
 
@@ -136,7 +179,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             clock = CMClockGetHostTimeClock()
         }
         core = try AVWriterCore(outputURL: URL(fileURLWithPath: config.outputPath),
-                                width: Self.width, height: Self.height, fps: config.fps,
+                                width: captureWidth, height: captureHeight, fps: config.fps,
                                 sampleRate: config.sampleRate, channels: config.channels,
                                 audioCodec: .aac, realTime: true, clock: clock)
         try core.beginWriting()

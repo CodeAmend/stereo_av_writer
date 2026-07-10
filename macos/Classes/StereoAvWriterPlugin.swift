@@ -117,7 +117,9 @@ public class StereoAvWriterPlugin: NSObject, FlutterPlugin {
           if let e = error {
             result(FlutterError(code: "preview_failed", message: e.localizedDescription, details: "\(e)"))
           } else {
-            result(nil)
+            // v0.82 .3b — return the negotiated capture dimensions so Dart can report
+            // the true aspect ratio (arch-82 D8).
+            result(["width": rec.dimensions.width, "height": rec.dimensions.height])
           }
         }
       }
@@ -127,7 +129,10 @@ public class StereoAvWriterPlugin: NSObject, FlutterPlugin {
         result(FlutterError(code: "no_preview", message: "startCameraPreview first", details: nil))
         return
       }
-      rec.beginRecording { error in
+      let bargs = (call.arguments as? [String: Any]) ?? [:]
+      let bchannels = (bargs["channels"] as? Int) ?? 2
+      let bsampleRate = (bargs["sampleRate"] as? Int) ?? 48_000
+      rec.beginRecording(channels: bchannels, sampleRate: bsampleRate) { error in
         DispatchQueue.main.async {
           if let e = error {
             result(FlutterError(code: "begin_failed", message: e.localizedDescription, details: "\(e)"))
@@ -143,8 +148,23 @@ public class StereoAvWriterPlugin: NSObject, FlutterPlugin {
       let discovery = AVCaptureDevice.DiscoverySession(
         deviceTypes: [.builtInWideAngleCamera, .externalUnknown],
         mediaType: .video, position: .unspecified)
-      let cams = discovery.devices.map { ["id": $0.uniqueID, "name": $0.localizedName] }
+      // v0.82 .3b — report built-in vs external so the record modal can pick a smart
+      // mirror default per camera (built-in/front → mirrored; external rig → not).
+      let cams = discovery.devices.map { [
+        "id": $0.uniqueID,
+        "name": $0.localizedName,
+        "isExternal": $0.deviceType != .builtInWideAngleCamera,
+      ] }
       result(cams)
+
+    case "setMirror":
+      // v0.82 .3b — mirror BOTH the preview (via the registry) and the RECORDED
+      // frames (the recorder's output connection) in lockstep = true WYSIWYG
+      // (arch-82 D2). Live-toggleable.
+      let on = (call.arguments as? [String: Any])?["mirrored"] as? Bool ?? true
+      PreviewSessionRegistry.shared.mirrored = on
+      recorder?.applyMirrorToOutput(on)
+      result(nil)
 
     default:
       result(FlutterMethodNotImplemented)
